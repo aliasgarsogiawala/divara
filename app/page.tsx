@@ -4,15 +4,20 @@ import { FormEvent, useMemo, useState } from "react";
 
 type BatchStatus = "queued" | "processing" | "completed" | "failed";
 
+type ShotResult = {
+  status: BatchStatus;
+  imageUrl?: string;
+  mediaUrls?: string[];
+  savedPaths?: string[];
+  requestId?: string;
+  error?: string;
+};
+
 type UploadItem = {
   id: string;
   file: File;
   previewUrl: string;
-  status: BatchStatus;
-  imageUrl?: string;
-  mediaUrls?: string[];
-  requestId?: string;
-  error?: string;
+  results: ShotResult[];
 };
 
 type BatchResponseItem = {
@@ -20,21 +25,44 @@ type BatchResponseItem = {
   status: BatchStatus;
   imageUrl?: string;
   mediaUrls?: string[];
+  savedPaths?: string[];
   requestId?: string;
   error?: string;
 };
 
-const DEFAULT_PROMPT =
-  "Create a premium jewelry product photoshoot image from the uploaded ring reference. Preserve the exact ring design, band shape, gemstone setting, engravings, metal finish, scale, and proportions. Show the ring naturally worn on a woman's hand in a clean luxury editorial setting with soft realistic lighting, refined skin texture, and no distortion or hallucinated changes to the jewelry.";
+const PROMPTS = [
+  {
+    label: "Arm-Crossed Pose",
+    wardrobe: "Muted Green Top",
+    prompt:
+      "A high-end lifestyle commercial shot of a woman's graceful, bare hand wearing the single ring from the input images on her ring finger. The exact design, cut, band, and structure of the ring must remain completely unchanged from the input. Her bare forearm is crossed gently over her opposite bare forearm. She is wearing a sleeveless muted olive-green textured knit top, leaving her shoulders and arms exposed. Macro focus on the diamond's brilliance. Soft, diffused studio lighting, neutral beige background, hyper-realistic skin texture, subtle hand movement.",
+  },
+  {
+    label: "Raised Hand Profile",
+    wardrobe: "Muted Brown Top",
+    prompt:
+      "A close-up cinematic shot of a woman's bare hand raised with fingers slightly spread, showcasing the single ring from the input images on the ring finger. Do not alter the ring's design; the structure must perfectly match the original input. She is wearing a short-sleeved brown ribbed-knit top, leaving her entire forearm and elbow visible and bare. Minimalist studio aesthetic, soft focus neutral background, shallow depth of field, premium jewelry commercial style, subtle light shimmer.",
+  },
+  {
+    label: "Resting Hand Angle",
+    wardrobe: "Cream Linen Top",
+    prompt:
+      "An elegant, editorial close-up shot of a woman's bare hand resting flat on her opposite bare forearm, displaying the single ring from the input images on her ring finger. The design, shape, and gem settings of the ring must be preserved perfectly without any changes or distortions. She is wearing a sleeveless cream-colored linen top, showcasing her bare wrists and lower arms. Soft natural lighting from the side, clean minimalist aesthetic, hyper-detailed skin pores, slow macro pan focusing on the jewelry.",
+  },
+];
 
-const MINUTES_PER_IMAGE = 7.5;
+const MINUTES_PER_OUTPUT = 7.5;
+
+function emptyResults(): ShotResult[] {
+  return PROMPTS.map(() => ({ status: "queued" as BatchStatus }));
+}
 
 function createUploadItem(file: File): UploadItem {
   return {
     id: crypto.randomUUID(),
     file,
     previewUrl: URL.createObjectURL(file),
-    status: "queued",
+    results: emptyResults(),
   };
 }
 
@@ -55,25 +83,31 @@ function formatDuration(totalMinutes: number) {
 
 export default function Home() {
   const [items, setItems] = useState<UploadItem[]>([]);
-  const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
+  const [outputDirectory, setOutputDirectory] = useState("");
   const [isRunning, setIsRunning] = useState(false);
   const [notice, setNotice] = useState("");
 
-  const completedCount = items.filter((item) => item.status === "completed").length;
-  const failedCount = items.filter((item) => item.status === "failed").length;
-  const totalEstimate = items.length * MINUTES_PER_IMAGE;
-  const batchLabel = `${items.length} image${items.length === 1 ? "" : "s"}`;
+  const allResults = items.flatMap((item) => item.results);
+  const completedCount = allResults.filter((item) => item.status === "completed").length;
+  const failedCount = allResults.filter((item) => item.status === "failed").length;
+  const totalOutputs = items.length * PROMPTS.length;
+  const totalEstimate = totalOutputs * MINUTES_PER_OUTPUT;
 
   const exportData = useMemo(
     () =>
       JSON.stringify(
-        items.map(({ file, status, imageUrl, mediaUrls, requestId, error }) => ({
-          sourceFile: file.name,
-          status,
-          imageUrl,
-          mediaUrls,
-          requestId,
-          error,
+        items.map((item) => ({
+          sourceFile: item.file.name,
+          shots: item.results.map((result, index) => ({
+            prompt: PROMPTS[index].label,
+            wardrobe: PROMPTS[index].wardrobe,
+            status: result.status,
+            imageUrl: result.imageUrl,
+            mediaUrls: result.mediaUrls,
+            savedPaths: result.savedPaths,
+            requestId: result.requestId,
+            error: result.error,
+          })),
         })),
         null,
         2,
@@ -106,40 +140,51 @@ export default function Home() {
       return;
     }
 
-    if (!prompt.trim()) {
-      setNotice("Add a prompt before batch processing.");
+    if (!outputDirectory.trim()) {
+      setNotice("Add an output folder path before batch processing.");
       return;
     }
 
     setIsRunning(true);
     setNotice(
-      `Batch started. ${batchLabel} will take approximately ${formatDuration(
+      `Batch started. ${items.length} image${items.length === 1 ? "" : "s"} x ${
+        PROMPTS.length
+      } prompts = ${totalOutputs} outputs. Estimated time: ${formatDuration(
         totalEstimate,
       )}. Keep this page open while it runs.`,
     );
     setItems((current) =>
       current.map((item) => ({
         ...item,
-        status: "processing",
-        imageUrl: undefined,
-        mediaUrls: undefined,
-        requestId: undefined,
-        error: undefined,
+        results: PROMPTS.map(() => ({ status: "processing" as BatchStatus })),
       })),
     );
 
     const formData = new FormData();
-    const payloadItems = items.map((item) => {
+    const payloadItems: {
+      id: string;
+      prompt: string;
+      imageField: string;
+      outputName: string;
+    }[] = [];
+
+    for (const item of items) {
       const imageField = `image_${item.id}`;
+      const sourceName = item.file.name.replace(/\.[^.]+$/, "");
       formData.append(imageField, item.file);
-      return {
-        id: item.id,
-        prompt: prompt.trim(),
-        imageField,
-      };
-    });
+
+      PROMPTS.forEach((entry, index) => {
+        payloadItems.push({
+          id: `${item.id}__${index}`,
+          prompt: entry.prompt,
+          imageField,
+          outputName: `${sourceName}-${entry.label}`,
+        });
+      });
+    }
 
     formData.append("items", JSON.stringify(payloadItems));
+    formData.append("outputDirectory", outputDirectory.trim());
 
     try {
       const response = await fetch("/api/higgsfield/batch", {
@@ -158,25 +203,44 @@ export default function Home() {
 
       setItems((current) =>
         current.map((item) => {
-          const result = data.items?.find((candidate) => candidate.id === item.id);
-          return result ? { ...item, ...result } : item;
+          const results = PROMPTS.map((_, index) => {
+            const result = data.items?.find(
+              (candidate) => candidate.id === `${item.id}__${index}`,
+            );
+
+            return result
+              ? {
+                  status: result.status,
+                  imageUrl: result.imageUrl,
+                  mediaUrls: result.mediaUrls,
+                  savedPaths: result.savedPaths,
+                  requestId: result.requestId,
+                  error: result.error,
+                }
+              : { status: "failed" as BatchStatus, error: "No result returned." };
+          });
+
+          return { ...item, results };
         }),
       );
 
       const failures = data.items.filter((item) => item.status === "failed").length;
       setNotice(
         failures
-          ? `Batch finished with ${failures} failed image${failures === 1 ? "" : "s"}.`
+          ? `Batch finished with ${failures} failed output${failures === 1 ? "" : "s"}.`
           : "Batch processing complete.",
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Something went wrong.";
       setItems((current) =>
-        current.map((item) =>
-          item.status === "processing"
-            ? { ...item, status: "failed", error: message }
-            : item,
-        ),
+        current.map((item) => ({
+          ...item,
+          results: item.results.map((result) =>
+            result.status === "processing"
+              ? { status: "failed" as BatchStatus, error: message }
+              : result,
+          ),
+        })),
       );
       setNotice(message);
     } finally {
@@ -189,7 +253,7 @@ export default function Home() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = "higgsfield-batch-results.json";
+    link.download = "higgsfield-three-shot-results.json";
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -203,19 +267,19 @@ export default function Home() {
         <header className="flex flex-col gap-4 border-b border-black/10 pb-5 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <p className="text-sm font-medium uppercase tracking-[0.16em] text-[#6b5d4d]">
-              Higgsfield Production Batch
+              Higgsfield Three-Shot Batch
             </p>
             <h1 className="mt-2 max-w-3xl text-4xl font-semibold leading-tight sm:text-5xl">
-              Upload images and process the batch
+              Generate 3 campaign images per upload
             </h1>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-black/60">
-              Each image takes around 7.5 minutes. Large batches will take time, so
-              keep this page open until the results appear.
+              Each uploaded ring image runs through the arm-crossed, raised-hand,
+              and resting-hand prompts. Keep this page open until the results appear.
             </p>
           </div>
 
           <div className="grid grid-cols-3 gap-2 text-center sm:min-w-[380px]">
-            <Stat label="Images" value={items.length} />
+            <Stat label="Outputs" value={totalOutputs} />
             <Stat label="Done" value={completedCount} />
             <Stat label="Failed" value={failedCount} />
           </div>
@@ -224,7 +288,7 @@ export default function Home() {
         <section className="grid gap-5 lg:grid-cols-[380px_1fr]">
           <aside className="flex flex-col gap-4 rounded-lg border border-black/10 bg-white p-4 shadow-sm">
             <label className="grid gap-2 text-sm font-medium">
-              Upload images
+              Upload ring images
               <input
                 disabled={isRunning}
                 multiple
@@ -236,21 +300,40 @@ export default function Home() {
             </label>
 
             <label className="grid gap-2 text-sm font-medium">
-              Prompt
-              <textarea
-                value={prompt}
+              Output folder path
+              <input
                 disabled={isRunning}
-                onChange={(event) => setPrompt(event.target.value)}
-                className="min-h-56 resize-y rounded-md border border-black/15 px-3 py-2 text-sm leading-6 outline-none focus:border-[#1f6f68] disabled:opacity-70"
+                value={outputDirectory}
+                onChange={(event) => setOutputDirectory(event.target.value)}
+                placeholder="/Users/name/Desktop/higgsfield-results"
+                className="h-11 rounded-md border border-black/15 bg-[#fbfaf8] px-3 text-sm outline-none focus:border-[#1f6f68] disabled:opacity-70"
               />
             </label>
 
+            <div className="grid gap-2 rounded-md border border-black/10 bg-[#fbfaf8] p-3">
+              <span className="text-xs font-semibold uppercase tracking-[0.14em] text-black/45">
+                Fixed prompts
+              </span>
+              {PROMPTS.map((entry, index) => (
+                <div key={entry.label} className="rounded-md bg-white p-2">
+                  <p className="text-sm font-semibold">
+                    {index + 1}. {entry.label}
+                  </p>
+                  <p className="text-xs text-black/50">{entry.wardrobe}</p>
+                </div>
+              ))}
+            </div>
+
             <div className="rounded-md border border-[#d8c7aa] bg-[#fff8eb] p-3 text-sm leading-6 text-[#5e4b2d]">
-              Batch size: <strong>{batchLabel}</strong>
+              Uploaded images: <strong>{items.length}</strong>
+              <br />
+              Outputs: <strong>{totalOutputs}</strong>
               <br />
               Estimated time: <strong>{formatDuration(totalEstimate)}</strong>
               <br />
-              Calculation: {items.length} x 7.5 minutes
+              Calculation: {items.length} x 3 x 7.5 minutes
+              <br />
+              Saves to: <strong>{outputDirectory.trim() || "Add folder path"}</strong>
             </div>
 
             <div className="flex gap-2">
@@ -276,10 +359,10 @@ export default function Home() {
             </div>
 
             <button
-              disabled={isRunning || items.length === 0}
+              disabled={isRunning || items.length === 0 || !outputDirectory.trim()}
               className="h-12 rounded-md bg-[#1f6f68] px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#185b56] disabled:cursor-not-allowed disabled:bg-black/25"
             >
-              {isRunning ? "Processing batch..." : "Batch process images"}
+              {isRunning ? "Processing batch..." : "Generate 3 images each"}
             </button>
 
             {notice ? (
@@ -289,17 +372,17 @@ export default function Home() {
             ) : null}
           </aside>
 
-          <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          <section className="grid gap-4">
             {items.length === 0 ? (
-              <div className="col-span-full flex min-h-80 items-center justify-center rounded-lg border border-dashed border-black/20 bg-white p-8 text-center text-sm text-black/50">
-                Uploaded images will appear here.
+              <div className="flex min-h-80 items-center justify-center rounded-lg border border-dashed border-black/20 bg-white p-8 text-center text-sm text-black/50">
+                Uploaded images and their three outputs will appear here.
               </div>
             ) : null}
 
             {items.map((item, index) => (
               <article
                 key={item.id}
-                className="flex flex-col gap-3 rounded-lg border border-black/10 bg-white p-3 shadow-sm"
+                className="grid gap-4 rounded-lg border border-black/10 bg-white p-3 shadow-sm"
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
@@ -308,47 +391,74 @@ export default function Home() {
                     </p>
                     <p className="truncate text-xs text-black/45">{item.file.name}</p>
                   </div>
-                  <StatusPill status={item.status} />
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <Preview title="Source" src={item.previewUrl} />
-                  <Preview
-                    title="Output"
-                    src={item.imageUrl}
-                    fallback={
-                      item.status === "processing"
-                        ? "Waiting"
-                        : item.status === "failed"
-                          ? "Failed"
-                          : "Output"
-                    }
-                  />
-                </div>
-
-                {item.error ? (
-                  <p className="rounded-md bg-[#fbe7e5] px-3 py-2 text-xs font-medium leading-5 text-[#9f241c]">
-                    {item.error}
-                  </p>
-                ) : item.imageUrl ? (
-                  <a
-                    href={item.imageUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-sm font-semibold text-[#1f6f68] hover:underline"
-                  >
-                    Open generated image
-                  </a>
-                ) : (
                   <button
                     type="button"
                     disabled={isRunning}
                     onClick={() => removeItem(item.id)}
-                    className="h-9 rounded-md border border-black/10 text-sm font-semibold text-black/55 hover:bg-black/[.03] disabled:cursor-not-allowed disabled:opacity-45"
+                    className="h-9 rounded-md border border-black/10 px-3 text-sm font-semibold text-black/55 hover:bg-black/[.03] disabled:cursor-not-allowed disabled:opacity-45"
                   >
                     Remove
                   </button>
-                )}
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-[180px_1fr]">
+                  <Preview title="Source" src={item.previewUrl} />
+
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    {item.results.map((result, shotIndex) => (
+                      <div
+                        key={PROMPTS[shotIndex].label}
+                        className="rounded-md border border-black/10 bg-[#fbfaf8] p-2"
+                      >
+                        <div className="mb-2 flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="truncate text-xs font-semibold">
+                              {PROMPTS[shotIndex].label}
+                            </p>
+                            <p className="truncate text-[11px] text-black/45">
+                              {PROMPTS[shotIndex].wardrobe}
+                            </p>
+                          </div>
+                          <StatusPill status={result.status} />
+                        </div>
+
+                        <Preview
+                          title="Output"
+                          src={result.imageUrl}
+                          fallback={
+                            result.status === "processing"
+                              ? "Waiting"
+                              : result.status === "failed"
+                                ? "Failed"
+                                : "Output"
+                          }
+                        />
+
+                        {result.error ? (
+                          <p className="mt-2 rounded-md bg-[#fbe7e5] px-2 py-1 text-[11px] font-medium leading-5 text-[#9f241c]">
+                            {result.error}
+                          </p>
+                        ) : result.imageUrl ? (
+                          <>
+                            <a
+                              href={result.imageUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="mt-2 block text-xs font-semibold text-[#1f6f68] hover:underline"
+                            >
+                              Open generated image
+                            </a>
+                            {result.savedPaths && result.savedPaths.length > 0 ? (
+                              <p className="mt-1 truncate text-[11px] text-black/45">
+                                Saved: {result.savedPaths[0]}
+                              </p>
+                            ) : null}
+                          </>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </article>
             ))}
           </section>

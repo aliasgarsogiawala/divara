@@ -25,18 +25,26 @@ higgsfield product-photoshoot create --help
 npm run batch:higgsfield -- --input ./input-images --output ./higgsfield-results
 ```
 
-The script processes images one by one. Estimate about 7.5 minutes per image:
+The script processes each image through three fixed prompts:
+
+1. Arm-Crossed Pose — Muted Green Top
+2. Raised Hand Profile — Muted Brown Top
+3. Resting Hand Angle — Cream Linen Top
+
+Estimate about 7.5 minutes per generated output:
 
 ```text
-10 images = about 75 minutes
-20 images = about 150 minutes
+1 image = 3 outputs = about 22.5 minutes
+10 images = 30 outputs = about 225 minutes
+20 images = 60 outputs = about 450 minutes
 ```
 
 Keep the terminal open until it finishes.
 
 ## Results
 
-The script writes:
+Generated images are downloaded automatically into the output folder. The script
+also writes:
 
 ```text
 higgsfield-results/results.json
@@ -44,12 +52,6 @@ higgsfield-results/results.csv
 ```
 
 If one image fails, the script continues with the next image.
-
-## Custom prompt
-
-```bash
-npm run batch:higgsfield -- --input ./input-images --prompt "Your custom prompt here"
-```
 
 ## Useful options
 
@@ -67,4 +69,16 @@ The default setup is locked for jewelry product photos:
 mode: lifestyle_scene
 aspect ratio: 3:4
 variants per image: 1
+fixed prompts per image: 3
 ```
+
+## Localhost web app output folder
+
+In the browser app, enter a local folder path before running, for example:
+
+```text
+/Users/name/Desktop/higgsfield-results
+C:\Users\name\Desktop\higgsfield-results
+```
+
+The app creates the folder if needed and saves generated images there.

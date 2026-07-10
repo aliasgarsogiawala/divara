@@ -9,10 +9,28 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const imageExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif"]);
-const minutesPerImage = 7.5;
+const minutesPerOutput = 7.5;
 
-const defaultPrompt =
-  "Create a premium jewelry product photoshoot image from the uploaded ring reference. Preserve the exact ring design, band shape, gemstone setting, engravings, metal finish, scale, and proportions. Show the ring naturally worn on a woman's hand in a clean luxury editorial setting with soft realistic lighting, refined skin texture, and no distortion or hallucinated changes to the jewelry.";
+const prompts = [
+  {
+    label: "Arm-Crossed Pose",
+    wardrobe: "Muted Green Top",
+    prompt:
+      "A high-end lifestyle commercial shot of a woman's graceful, bare hand wearing the single ring from the input images on her ring finger. The exact design, cut, band, and structure of the ring must remain completely unchanged from the input. Her bare forearm is crossed gently over her opposite bare forearm. She is wearing a sleeveless muted olive-green textured knit top, leaving her shoulders and arms exposed. Macro focus on the diamond's brilliance. Soft, diffused studio lighting, neutral beige background, hyper-realistic skin texture, subtle hand movement.",
+  },
+  {
+    label: "Raised Hand Profile",
+    wardrobe: "Muted Brown Top",
+    prompt:
+      "A close-up cinematic shot of a woman's bare hand raised with fingers slightly spread, showcasing the single ring from the input images on the ring finger. Do not alter the ring's design; the structure must perfectly match the original input. She is wearing a short-sleeved brown ribbed-knit top, leaving her entire forearm and elbow visible and bare. Minimalist studio aesthetic, soft focus neutral background, shallow depth of field, premium jewelry commercial style, subtle light shimmer.",
+  },
+  {
+    label: "Resting Hand Angle",
+    wardrobe: "Cream Linen Top",
+    prompt:
+      "An elegant, editorial close-up shot of a woman's bare hand resting flat on her opposite bare forearm, displaying the single ring from the input images on her ring finger. The design, shape, and gem settings of the ring must be preserved perfectly without any changes or distortions. She is wearing a sleeveless cream-colored linen top, showcasing her bare wrists and lower arms. Soft natural lighting from the side, clean minimalist aesthetic, hyper-detailed skin pores, slow macro pan focusing on the jewelry.",
+  },
+];
 
 const args = parseArgs(process.argv.slice(2));
 
@@ -23,7 +41,6 @@ if (args.help || !args.input) {
 
 const inputDir = path.resolve(args.input);
 const outputDir = path.resolve(args.output ?? "higgsfield-results");
-const prompt = args.prompt ?? defaultPrompt;
 const mode = args.mode ?? "lifestyle_scene";
 const aspectRatio = args.aspectRatio ?? "3:4";
 const count = clamp(Number(args.count ?? 1), 1, 10);
@@ -48,8 +65,10 @@ if (files.length === 0) {
   process.exit(1);
 }
 
+const totalOutputs = files.length * prompts.length;
 console.log(`Found ${files.length} image${files.length === 1 ? "" : "s"}.`);
-console.log(`Estimated time: ${formatDuration(files.length * minutesPerImage)}.`);
+console.log(`Each image will generate ${prompts.length} fixed campaign shots.`);
+console.log(`Estimated time: ${formatDuration(totalOutputs * minutesPerOutput)}.`);
 console.log(`Output folder: ${outputDir}`);
 console.log("");
 
@@ -62,27 +81,49 @@ for (const [index, file] of files.entries()) {
 
   console.log(`[${label}] Processing ${name}`);
 
-  const result = await runHiggsfield(file, {
-    prompt,
-    mode,
-    aspectRatio,
-    count,
-    timeout,
-    interval,
-  });
+  const shots = [];
+
+  for (const [promptIndex, promptEntry] of prompts.entries()) {
+    console.log(`  [${promptIndex + 1}/${prompts.length}] ${promptEntry.label}`);
+
+    const result = await runHiggsfield(file, {
+      prompt: promptEntry.prompt,
+      mode,
+      aspectRatio,
+      count,
+      timeout,
+      interval,
+      outputDir,
+      file,
+      shotLabel: promptEntry.label,
+    });
+
+    shots.push({
+      label: promptEntry.label,
+      wardrobe: promptEntry.wardrobe,
+      prompt: promptEntry.prompt,
+      ...result,
+    });
+
+    await writeReports(outputDir, startedAt, [
+      ...results,
+      {
+        sourceFile: file,
+        shots,
+      },
+    ]);
+
+    if (result.status === "completed") {
+      console.log(`  Done: ${result.mediaUrls.join(", ")}`);
+    } else {
+      console.log(`  Failed: ${result.error}`);
+    }
+  }
 
   results.push({
     sourceFile: file,
-    ...result,
+    shots,
   });
-
-  await writeReports(outputDir, startedAt, results);
-
-  if (result.status === "completed") {
-    console.log(`[${label}] Done: ${result.mediaUrls.join(", ")}`);
-  } else {
-    console.log(`[${label}] Failed: ${result.error}`);
-  }
 
   console.log("");
 }
@@ -136,10 +177,19 @@ async function runHiggsfield(file, options) {
 
     const raw = parseCliJson(stdout);
     const mediaUrls = extractMediaUrls(raw);
+    const savedPaths =
+      mediaUrls.length > 0
+        ? await saveGeneratedMedia(mediaUrls, {
+            outputDir: options.outputDir,
+            sourceFile: options.file,
+            shotLabel: options.shotLabel,
+          })
+        : [];
 
     return {
       status: mediaUrls.length > 0 ? "completed" : "failed",
       mediaUrls,
+      savedPaths,
       imageUrl: mediaUrls[0] ?? "",
       requestId: extractRequestId(raw) ?? "",
       error: mediaUrls.length > 0 ? "" : "Higgsfield finished without returning a media URL.",
@@ -149,6 +199,7 @@ async function runHiggsfield(file, options) {
     return {
       status: "failed",
       mediaUrls: [],
+      savedPaths: [],
       imageUrl: "",
       requestId: "",
       error: formatCliError(error),
@@ -169,8 +220,13 @@ async function writeReports(outputDir, startedAt, results) {
         startedAt,
         updatedAt: finishedAt,
         total: results.length,
-        completed: results.filter((result) => result.status === "completed").length,
-        failed: results.filter((result) => result.status === "failed").length,
+        totalOutputs: results.flatMap((result) => result.shots).length,
+        completed: results
+          .flatMap((result) => result.shots)
+          .filter((result) => result.status === "completed").length,
+        failed: results
+          .flatMap((result) => result.shots)
+          .filter((result) => result.status === "failed").length,
         results,
       },
       null,
@@ -179,15 +235,30 @@ async function writeReports(outputDir, startedAt, results) {
   );
 
   const csvRows = [
-    ["source_file", "status", "image_url", "all_media_urls", "request_id", "error"],
-    ...results.map((result) => [
-      result.sourceFile,
-      result.status,
-      result.imageUrl,
-      result.mediaUrls.join(" | "),
-      result.requestId,
-      result.error,
-    ]),
+    [
+      "source_file",
+      "shot",
+      "wardrobe",
+      "status",
+      "image_url",
+      "all_media_urls",
+      "saved_paths",
+      "request_id",
+      "error",
+    ],
+    ...results.flatMap((result) =>
+      result.shots.map((shot) => [
+        result.sourceFile,
+        shot.label,
+        shot.wardrobe,
+        shot.status,
+        shot.imageUrl,
+        shot.mediaUrls.join(" | "),
+        shot.savedPaths.join(" | "),
+        shot.requestId,
+        shot.error,
+      ]),
+    ),
   ];
 
   await writeFile(csvPath, csvRows.map((row) => row.map(csvEscape).join(",")).join("\n"));
@@ -233,7 +304,6 @@ Required:
 
 Optional:
   --output <folder>        Folder for results.json and results.csv.
-  --prompt <text>          Override the default jewelry prompt.
   --mode <mode>            Higgsfield mode. Default: lifestyle_scene.
   --aspectRatio <ratio>    Default: 3:4.
   --count <number>         Variants per image, 1-10. Default: 1.
@@ -316,6 +386,63 @@ function extractRequestId(value) {
 
   const id = value.request_id ?? value.requestId ?? value.id ?? value.job_id;
   return typeof id === "string" ? id : undefined;
+}
+
+async function saveGeneratedMedia(mediaUrls, { outputDir, sourceFile, shotLabel }) {
+  await mkdir(outputDir, { recursive: true });
+
+  const savedPaths = [];
+  const sourceName = path.basename(sourceFile, path.extname(sourceFile));
+  const shotName = slugify(shotLabel);
+
+  for (const [index, mediaUrl] of mediaUrls.entries()) {
+    const response = await fetch(mediaUrl);
+
+    if (!response.ok) {
+      continue;
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
+    const extension = extensionFor(mediaUrl, contentType);
+    const suffix = mediaUrls.length > 1 ? `-${index + 1}` : "";
+    const fileName = `${slugify(sourceName)}-${shotName}${suffix}${extension}`;
+    const filePath = path.join(outputDir, fileName);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    await writeFile(filePath, buffer);
+    savedPaths.push(filePath);
+  }
+
+  return savedPaths;
+}
+
+function extensionFor(fileName, contentType) {
+  const parsed = fileName.match(/\.[a-z0-9]+(?=($|[?#]))/i)?.[0].toLowerCase() ?? "";
+
+  if (/^\.(png|jpe?g|webp|gif|heic|heif|mp4|mov)$/i.test(parsed)) {
+    return parsed;
+  }
+
+  if (contentType.includes("png")) {
+    return ".png";
+  }
+
+  if (contentType.includes("webp")) {
+    return ".webp";
+  }
+
+  if (contentType.includes("mp4")) {
+    return ".mp4";
+  }
+
+  return ".jpg";
+}
+
+function slugify(value) {
+  return String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
 }
 
 function formatCliError(error) {

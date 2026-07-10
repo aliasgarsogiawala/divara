@@ -11,6 +11,7 @@ type PromptItem = {
   id: string;
   prompt: string;
   imageField: string;
+  outputName?: string;
 };
 
 type BatchOptions = {
@@ -28,6 +29,7 @@ type BatchResult = {
   status: "completed" | "failed";
   imageUrl?: string;
   mediaUrls?: string[];
+  savedPaths?: string[];
   requestId?: string;
   error?: string;
   raw?: unknown;
@@ -43,6 +45,7 @@ export async function POST(request: Request) {
     const formData = await request.formData();
     const items = parseItems(formData.get("items"));
     const options = defaultOptions();
+    const outputDirectory = parseOutputDirectory(formData.get("outputDirectory"));
 
     if (items.length === 0) {
       return Response.json({ error: "Add at least one prompt and image." }, { status: 400 });
@@ -74,7 +77,7 @@ export async function POST(request: Request) {
         };
       }
 
-      return runProductPhotoshoot(item, imagePath, options);
+      return runProductPhotoshoot(item, imagePath, options, outputDirectory);
     });
 
     return Response.json({ items: results });
@@ -95,6 +98,14 @@ export async function POST(request: Request) {
   }
 }
 
+function parseOutputDirectory(value: FormDataEntryValue | null) {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  return value.trim();
+}
+
 function parseItems(value: FormDataEntryValue | null) {
   if (typeof value !== "string") {
     return [];
@@ -108,6 +119,7 @@ function parseItems(value: FormDataEntryValue | null) {
             id: String(item.id ?? ""),
             prompt: String(item.prompt ?? "").trim(),
             imageField: String(item.imageField ?? ""),
+            outputName: String(item.outputName ?? "").trim(),
           }))
           .filter((item) => item.id && item.prompt && item.imageField)
           .slice(0, 25)
@@ -140,6 +152,7 @@ async function runProductPhotoshoot(
   item: PromptItem,
   imagePath: string,
   options: Required<BatchOptions>,
+  outputDirectory: string,
 ): Promise<BatchResult> {
   const prompt = options.preserveStructure
     ? `${item.prompt}. Preserve the exact product geometry, gemstone setting, engravings, material finish, and proportions. Keep hallucination low and avoid changing the ring structure.`
@@ -193,6 +206,10 @@ async function runProductPhotoshoot(
 
     const raw = parseCliJson(stdout);
     const mediaUrls = extractMediaUrls(raw);
+    const savedPaths =
+      outputDirectory && mediaUrls.length > 0
+        ? await saveGeneratedMedia(mediaUrls, outputDirectory, item.outputName || item.id)
+        : [];
 
     return {
       id: item.id,
@@ -200,6 +217,7 @@ async function runProductPhotoshoot(
       status: mediaUrls.length > 0 ? "completed" : "failed",
       imageUrl: mediaUrls[0],
       mediaUrls,
+      savedPaths,
       requestId: extractRequestId(raw),
       error: mediaUrls.length > 0 ? undefined : "Higgsfield finished without returning a media URL.",
       raw,
@@ -212,6 +230,35 @@ async function runProductPhotoshoot(
       error: formatCliError(error),
     };
   }
+}
+
+async function saveGeneratedMedia(
+  mediaUrls: string[],
+  outputDirectory: string,
+  outputName: string,
+) {
+  const resolvedDirectory = outputDirectory;
+  await mkdir(resolvedDirectory, { recursive: true });
+
+  const savedPaths: string[] = [];
+
+  for (const [index, mediaUrl] of mediaUrls.entries()) {
+    const response = await fetch(mediaUrl);
+
+    if (!response.ok) {
+      continue;
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
+    const extension = extensionFor(mediaUrl, contentType);
+    const fileName = `${safeName(outputName)}${mediaUrls.length > 1 ? `-${index + 1}` : ""}${extension}`;
+    const filePath = `${resolvedDirectory.replace(/[\\/]$/, "")}/${fileName}`;
+    const buffer = Buffer.from(await response.arrayBuffer());
+    await writeFile(filePath, buffer);
+    savedPaths.push(filePath);
+  }
+
+  return savedPaths;
 }
 
 function resolveHiggsfieldBinary() {
